@@ -1,0 +1,7 @@
+Installation:
+
+	sudo make install
+
+Usage:
+
+	locate-mnt <mountpoint> <basedir> [patterns...]

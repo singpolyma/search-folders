@@ -1,0 +1,128 @@
+#!/usr/bin/ruby
+require 'fusefs'
+require 'daemonize'
+
+puts "Mounting to #{ARGV[0]}"
+puts "NOTE: the locate command is only re-run a minimum of every 60 seconds, for performance reasons.  File creations and deletions may not show up instantly."
+
+# Daemonize
+include Daemonize
+pwd = Dir.getwd
+daemonize()
+Dir.chdir pwd
+
+# Allows path-like access to hash contents
+class PathHash < Hash
+	def []=(k, v)
+		k = k.to_s.split(/\//)
+		while k[0] == '' || k[0] == '.'
+			k.shift
+		end
+		dir = k.shift
+		if k.length < 1
+			super(dir, v)
+		else 
+			super(dir, PathHash.new) unless self[dir]
+			self[dir][k.join('/')] = v
+		end
+	end
+	def [](k)
+		k = k.to_s.split(/\//)
+		while k[0] == '' || k[0] == '.'
+			k.shift
+		end
+		dir = k.shift
+		return self if !dir || dir == '' || dir == '.'
+		if k.length < 1
+			super(dir)
+		else 
+			self[dir][k.join('/')]
+		end
+	end
+end
+
+class LocateDir
+	def initialize(options)
+		@basepath = File.expand_path(options.shift)
+		@basepath.sub!(/\/$/, '')
+		@patterns = options
+
+		refresh
+	end
+	def refresh
+		@last_refresh = Time.now.to_f
+		@contents = PathHash.new
+		@patterns.each do |pattern|
+			`locate -s -0 '#{@basepath}/#{pattern}'`.split(/\0/).each do |absolute|
+				relative = absolute.sub(/^#{@basepath}\//,'')
+				@contents[relative] = absolute
+			end
+		end
+	end
+
+	def contents(path)
+		refresh if @last_refresh < (Time.now.to_f - 60)
+		@contents[path].keys
+	end
+	def size(path)
+		File.size(@contents[path])
+	end
+	def read_file(path)
+		open(@contents[path]).read
+	end
+   def write_to(path, str)
+		fh = File.new(path, "w")
+		fh.write str
+		fh.close
+	end
+
+	# XXX: dummy
+   def can_delete?(path)
+		false
+	end
+   def delete(path)
+	end
+
+	# Flags and permissions
+
+	def directory?(path)
+		@contents[path].is_a?PathHash
+	end
+	def can?(stat, perm)
+		#"---", "--x", "-w-", "-wx", "r--", "r-x", "rw-", "rwx"
+		mask = 0700
+		3.downto(1) do |i|
+			b = perm[(stat.mode & mask) >> ((i-1)*3)]
+			return true if i == 1 && b
+			return true if i == 2 && b && stat.gid == FuseFS.reader_gid
+			return true if i == 3 && b && stat.uid == FuseFS.reader_uid
+			mask >>= 3
+		end
+		false
+	end
+	def file?(path)
+		return false if directory?path
+
+		# Refuse to report this file exists if they cannot access it
+		stat = File.stat(@contents[path])
+		can?(stat, [false, false, false, false, true, true, true, true])
+	end
+	def can_write?(path)
+		stat = File.stat(@contents[path])
+		can?(stat, [false, false, true, true, false, false, true, true])
+	end
+	def executable?(path)
+		stat = File.stat(@contents[path])
+		can?(stat, [false, true, false, true, false, true, false, true])
+	end
+
+end
+
+# Setup and mount
+mountpoint = ARGV.shift
+
+FuseFS.set_root(LocateDir.new(ARGV))
+
+# Mount under a directory given on the command line.
+FuseFS.mount_under mountpoint
+FuseFS.run
