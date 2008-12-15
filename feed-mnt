@@ -1,0 +1,91 @@
+#!/usr/bin/ruby
+require 'fusefs'
+require 'daemonize'
+require 'open-uri'
+require 'rexml/document'
+
+puts "Mounting to #{ARGV[0]}"
+
+# Daemonize
+include Daemonize
+pwd = Dir.getwd
+#daemonize()
+Dir.chdir pwd
+
+class FeedDir
+	def initialize(file)
+		@feeds = {}
+		open(file).read.split(/\n/).each do |feed|
+			puts "Fetching #{feed}..."
+			begin
+				doc = REXML::Document.new(open(feed).read)
+				title = doc.get_text('/rss/channel/title').to_s.gsub(/\//,' - ')
+				items = []
+				i = 0
+				doc.each_element('//item') do |el|
+					items << {
+							:title => i.to_s.rjust(2,'0') + ' ' + el.get_text('title').to_s.gsub(/\//,' - '),
+							:description => el.get_text('description').to_s
+						}
+					i += 1
+				end
+				@feeds[title] = items
+			rescue Exception
+				warn $!.inspect
+			end
+		end
+		puts "System initialized."
+	end
+
+	def contents(path)
+		path = path.to_s.split(/\//)
+		while path[0] == '' || path[0] == '.'
+			path.shift
+		end
+		if path.length < 1
+			@feeds.keys
+		else
+			@feeds[path[0]].collect do |el|
+				el[:title]
+			end
+		end
+	end
+	def size(path)
+		read_file(path).size
+	end
+	def read_file(path)
+		path = path.to_s.split(/\//)
+		while path[0] == '' || path[0] == '.'
+			path.shift
+		end
+		if path[1] =~ /^\d+$/
+			return @feeds[path[0]][path[1].to_i]
+		else
+			@feeds[path[0]].each do |el|
+				return "== #{el[:title]} ==\n\n#{el[:description]}\n\n" if el[:title] == path[1]
+			end
+		end
+		""
+	end
+
+   def can_delete?(path); false; end
+	def can_write?(path); false; end
+	def executable?(path); false; end
+
+	def directory?(path)
+		! @feeds[path.sub(/^\//,'')].nil?
+	end
+	def file?(path)
+		! directory?(path)
+	end
+
+end
+
+# Setup and mount
+mountpoint = ARGV.shift
+
+FuseFS.set_root(FeedDir.new(ARGV[0]))
+
+# Mount under a directory given on the command line.
+FuseFS.mount_under mountpoint
+FuseFS.run
